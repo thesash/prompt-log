@@ -2,61 +2,9 @@
 
 **Session:** 6824f298-d451-4b59-b624-e068b26177c4
 
----
-
 User:
 ```
-Would this potentially fix the issue that we had the other day with Playwright returning massive context? https://github.com/vercel-labs/agent-browser What would be the downsides of using something like this? Would it be that I can no longer watch your browser session? Could it still open the browser if we wanted it to?
-```
-
-Assistant:
-```
-Ah interesting — let me check it out
-```
-
-Assistant:
-```
-Okay this is actually really cool — and yes, it could definitely help with the context explosion problem.
-```
-
-Assistant:
-```
-The key difference: instead of returning raw HTML, it gives you an accessibility tree with refs. Much more compact and AI-friendly.
-```
-
-Assistant:
-```
-Plus it has filtering options: `-i` for interactive elements only, `-c` for compact (removes empty structure), `-d` to limit depth, `-s` to scope to a selector. Combine those and you get a tiny focused snapshot.
-```
-
-Assistant:
-```
-To your questions:
-```
-
-Assistant:
-```
-👀 Watching the session: Yes, still possible! Use `--headed` to open a visible browser window. Default is headless, but you can flip it.
-```
-
-Assistant:
-```
-⚠️ Downsides I can see:
-```
-
-Assistant:
-```
-Honestly though, the context reduction could be worth it. The snapshot filtering is exactly what we needed. Clawdbot's browser tool returns everything; this lets you be surgical about what you pull.
-```
-
-Assistant:
-```
-Could be a good candidate for a skill — keep the native browser tool for quick stuff, use agent-browser when I need to navigate complex pages without blowing up context.
-```
-
-User:
-```
-ok on to a different topic can you create a skill that automates the process of creating a conversation for a PR like i did here? This exact format on the conversation https://github.com/clawdbot/clawdbot/pull/763
+can you create a skill that automates the process of creating a conversation for a PR like i did here? This exact format on the conversation https://github.com/clawdbot/clawdbot/pull/763
 ```
 
 Assistant:
@@ -268,4 +216,3 @@ User:
 ```
 run a full one and put it in appropriate folder in workspace
 ```
-

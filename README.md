@@ -20,13 +20,13 @@ Format is auto-detected.
 
 ```bash
 # Basic extraction (outputs to .prompt-log/YYYY-MM-DD-HHMMSS.md)
-./extract.sh <session-file>
+./skills/prompt-log/scripts/extract.sh <session-file>
 
 # Custom output file
-./extract.sh <session-file> --output my-transcript.md
+./skills/prompt-log/scripts/extract.sh <session-file> --output my-transcript.md
 
 # Time-bounded extraction
-./extract.sh <session-file> --after "2026-01-12T10:00:00" --before "2026-01-12T12:00:00"
+./skills/prompt-log/scripts/extract.sh <session-file> --after "2026-01-12T10:00:00" --before "2026-01-12T12:00:00"
 ```
 
 Output defaults to `.prompt-log/` directory to keep transcripts tidy in project folders.
