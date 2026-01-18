@@ -1,32 +1,53 @@
 #!/usr/bin/env bash
-# Extract a minimal transcript from AI coding session logs.
+# Prompt Log v2 - Extract text-only conversation transcript from Claude Code sessions.
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(pwd -P)"
+
 SESSION_FILE=""
 OUTPUT=""
+TOPIC_START=""
+TOPIC_END=""
+CHECK_COMPACTION=false
+DETECT_SESSION=false
 
 usage() {
-  echo "Usage: extract.sh [session-file] [--output file.md]" >&2
-  echo "" >&2
-  echo "Defaults to the latest session for the current platform." >&2
-  echo "" >&2
-  echo "Supported formats:" >&2
-  echo "  - Clawdbot: ~/.clawdbot/agents/main/sessions/*.jsonl" >&2
-  echo "  - Claude Code: ~/.claude/projects/<project>/*.jsonl" >&2
-  echo "  - Codex: ~/.codex/sessions/YYYY/MM/DD/*.jsonl" >&2
+  cat >&2 <<EOF
+Usage: extract.sh [options] [session-file]
+
+Options:
+  --output, -o FILE       Output markdown file path
+  --topic-start TIME      Filter messages starting from this timestamp
+  --topic-end TIME        Filter messages ending at this timestamp
+  --check-compaction      Check if session has been compacted and exit
+  --detect-session        Print the current session file path and exit
+  --help, -h              Show this help message
+
+If no session file is provided, uses the current Claude Code session.
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output|-o) OUTPUT="$2"; shift 2 ;;
+    --topic-start) TOPIC_START="$2"; shift 2 ;;
+    --topic-end) TOPIC_END="$2"; shift 2 ;;
+    --check-compaction) CHECK_COMPACTION=true; shift ;;
+    --detect-session) DETECT_SESSION=true; shift ;;
     --help|-h) usage; exit 0 ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
     *)
       if [[ -z "$SESSION_FILE" ]]; then
         SESSION_FILE="$1"
         shift
       else
-        echo "Unknown option: $1" >&2
+        echo "Unexpected argument: $1" >&2
         usage
         exit 1
       fi
@@ -34,264 +55,215 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Expand tilde and make output path absolute
+if [[ -n "$OUTPUT" ]]; then
+  OUTPUT="${OUTPUT/#\~/$HOME}"
+  if [[ "$OUTPUT" != /* ]]; then
+    OUTPUT="$ROOT_DIR/$OUTPUT"
+  fi
+fi
+
+# Require jq
 if ! command -v jq >/dev/null 2>&1; then
-  echo "jq is required in PATH." >&2
+  echo "Error: jq is required in PATH." >&2
   exit 1
 fi
 
-detect_source() {
-  if [[ -n "${CODEX_CI:-}" || -n "${CODEX_HOME:-}" || -n "${CODEX_SESSION:-}" ]]; then
-    echo "codex"
-    return
-  fi
-  if [[ -n "${CLAUDE_PROJECT:-}" || -n "${CLAUDE_CODE:-}" ]]; then
-    echo "claude-code"
-    return
-  fi
-  if [[ -n "${CLAWDBOT_SESSION_ID:-}" || -n "${CLAWDBOT_AGENT:-}" ]]; then
-    echo "clawdbot"
-    return
-  fi
-  echo ""
+# Convert a directory path to Claude's project directory name
+# /Users/foo/bar -> -Users-foo-bar
+path_to_project_dir() {
+  local path="$1"
+  echo "$path" | sed 's|/|-|g'
 }
 
-codex_session_from_history() {
-  local history="$HOME/.codex/history.jsonl"
-  local session_id=""
-  local match=""
-  if [[ ! -f "$history" ]]; then
-    return 1
-  fi
-  session_id=$(tail -n 1 "$history" | jq -r '.session_id // empty' 2>/dev/null)
-  if [[ -z "$session_id" || "$session_id" == "null" ]]; then
-    return 1
-  fi
-  shopt -s nullglob
-  match=$(ls -t "$HOME/.codex/sessions/"*/*/*/*"${session_id}".jsonl 2>/dev/null | head -n 1)
-  shopt -u nullglob
-  if [[ -z "$match" ]]; then
-    return 1
-  fi
-  printf '%s' "$match"
-}
+# Find the current Claude Code session file
+find_current_session() {
+  local project_dir
+  project_dir=$(path_to_project_dir "$ROOT_DIR")
+  local claude_project_path="$HOME/.claude/projects/$project_dir"
 
-latest_from_glob() {
-  local pattern="$1"
-  local files=()
-  local latest=""
-  shopt -s nullglob
-  files=( $pattern )
-  shopt -u nullglob
-  if [[ ${#files[@]} -eq 0 ]]; then
+  if [[ ! -d "$claude_project_path" ]]; then
     return 1
   fi
-  latest=$(ls -t "${files[@]}" 2>/dev/null | head -n 1)
+
+  # Find most recently modified .jsonl file
+  local latest
+  latest=$(find "$claude_project_path" -maxdepth 1 -name "*.jsonl" -type f -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null \
+    | head -n 1)
+
   if [[ -z "$latest" ]]; then
     return 1
   fi
+
   printf '%s' "$latest"
 }
 
-latest_for_source() {
-  local source="$1"
-  case "$source" in
-    clawdbot)
-      latest_from_glob "$HOME/.clawdbot/agents/main/sessions/"*.jsonl
-      ;;
-    claude-code)
-      latest_from_glob "$HOME/.claude/projects/"*/*.jsonl
-      ;;
-    codex)
-      latest_from_glob "$HOME/.codex/sessions/"*/*/*/*.jsonl
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+# Check if a session file has been compacted (contains summary entries)
+check_compaction() {
+  local session="$1"
+  if jq -e 'select(.type == "summary")' "$session" >/dev/null 2>&1; then
+    return 0  # Has compaction
+  fi
+  return 1  # No compaction
 }
 
-file_mtime() {
-  local file="$1"
-  if stat -f %m "$file" >/dev/null 2>&1; then
-    stat -f %m "$file"
-  else
-    stat -c %Y "$file"
+# Handle --detect-session mode
+if [[ "$DETECT_SESSION" == true ]]; then
+  session=$(find_current_session 2>/dev/null || true)
+  if [[ -z "$session" ]]; then
+    echo "No session found for: $ROOT_DIR" >&2
+    exit 1
   fi
-}
+  echo "$session"
+  exit 0
+fi
 
-latest_any() {
-  local candidate=""
-  local candidates=()
-  local best=""
-  local best_mtime=0
-  local mtime=0
-
-  candidate=$(latest_for_source "clawdbot" 2>/dev/null || true)
-  if [[ -n "$candidate" ]]; then
-    candidates+=("$candidate")
-  fi
-  candidate=$(latest_for_source "claude-code" 2>/dev/null || true)
-  if [[ -n "$candidate" ]]; then
-    candidates+=("$candidate")
-  fi
-  candidate=$(latest_for_source "codex" 2>/dev/null || true)
-  if [[ -n "$candidate" ]]; then
-    candidates+=("$candidate")
-  fi
-
-  if [[ ${#candidates[@]} -eq 0 ]]; then
-    return 1
-  fi
-
-  for candidate in "${candidates[@]}"; do
-    mtime=$(file_mtime "$candidate" 2>/dev/null || echo 0)
-    if [[ -z "$best" || "$mtime" -gt "$best_mtime" ]]; then
-      best="$candidate"
-      best_mtime="$mtime"
-    fi
-  done
-
-  printf '%s' "$best"
-}
-
+# Find session file if not provided
 if [[ -z "$SESSION_FILE" ]]; then
-  source_override=$(detect_source)
-  if [[ -n "$source_override" ]]; then
-    if [[ "$source_override" == "codex" ]]; then
-      SESSION_FILE=$(codex_session_from_history 2>/dev/null || true)
-    fi
-    if [[ -z "$SESSION_FILE" ]]; then
-      SESSION_FILE=$(latest_for_source "$source_override" 2>/dev/null || true)
-    fi
-  fi
+  SESSION_FILE=$(find_current_session 2>/dev/null || true)
   if [[ -z "$SESSION_FILE" ]]; then
-    SESSION_FILE=$(latest_any 2>/dev/null || true)
-  fi
-  if [[ -z "$SESSION_FILE" ]]; then
-    echo "No session files found." >&2
-    usage
+    echo "No session file found for current directory." >&2
+    echo "Looked in: ~/.claude/projects/$(path_to_project_dir "$ROOT_DIR")/" >&2
     exit 1
   fi
 fi
 
+# Validate session file exists
 if [[ ! -f "$SESSION_FILE" ]]; then
   echo "File not found: $SESSION_FILE" >&2
   exit 1
 fi
 
-if [[ -z "$OUTPUT" ]]; then
-  mkdir -p .prompt-log
-  timestamp=$(date +%Y%m%d%H%M)
-  OUTPUT=".prompt-log/${timestamp}.md"
-fi
-
-detect_format() {
-  if jq -e 'select(.type == "session")' "$SESSION_FILE" >/dev/null 2>&1; then
-    echo "clawdbot"
-  elif jq -e 'select(.userType == "external")' "$SESSION_FILE" >/dev/null 2>&1; then
-    echo "claude-code"
-  elif jq -e 'select(.type == "session_meta" or .type == "response_item")' "$SESSION_FILE" >/dev/null 2>&1; then
-    echo "codex"
+# Handle --check-compaction mode
+if [[ "$CHECK_COMPACTION" == true ]]; then
+  if check_compaction "$SESSION_FILE"; then
+    echo "compacted"
+    exit 0
   else
-    echo "unknown"
+    echo "not-compacted"
+    exit 0
   fi
-}
-
-FORMAT=$(detect_format)
-
-if [[ "$FORMAT" == "unknown" ]]; then
-  echo "Unknown session format for: $SESSION_FILE" >&2
-  exit 1
 fi
 
+# Set default output path
+if [[ -z "$OUTPUT" ]]; then
+  mkdir -p "$ROOT_DIR/.prompt-log"
+  timestamp=$(date +%Y%m%d%H%M)
+  OUTPUT="$ROOT_DIR/.prompt-log/prompt-log-v2-${timestamp}.md"
+fi
+
+# Create temporary file for output
 TMPOUT=$(mktemp)
 trap 'rm -f "$TMPOUT"' EXIT
 
-case "$FORMAT" in
-  clawdbot)
-    jq -r --arg agent "Clawdbot" '
-      def clean_user:
-        .message.content[0].text // "" |
-        (split("[Current message") | last) as $chunk |
-        ($chunk | capture("Z\\]\\s*(?<msg>.+?)\\n\\[message_id")?.msg) as $parsed |
-        (if $parsed != null and $parsed != "" then $parsed else $chunk end) |
-        gsub("^\\s+|\\s+$"; "");
-      def assistant_text:
-        .message.content
-        | map(
-            if .type == "toolCall" and .name == "message" and .arguments.action == "send" then .arguments.message
-            elif .type == "text" then .text
-            else empty
-            end
-          )
-        | map(select(. != null and . != "") | gsub("^\\[\\[reply_to:[^\\]]+\\]\\]\\s*"; ""))
-        | join("\n\n");
-      def emit($role; $timestamp; $text):
-        if ($text | length) == 0 then empty
-        else "\($role) \($timestamp)\n```\n\($text)\n```\n\n"
-        end;
-      select(.type == "message") |
-      if .message.role == "user" then
-        emit("User"; .timestamp; clean_user)
-      elif .message.role == "assistant" then
-        emit($agent; .timestamp; assistant_text)
-      else empty end
-    ' "$SESSION_FILE" > "$TMPOUT"
-    ;;
-  claude-code)
-    jq -r --arg agent "Claude Code" '
-      def message_text:
-        .message.content |
-        if type == "string" then .
-        elif type == "array" then
-          map(select(.type == "text" or .type == "input_text") | .text) | join("\n")
-        elif type == "object" and has("text") then .text
-        else "" end;
-      def emit($role; $timestamp; $text):
-        if ($text | length) == 0 then empty
-        else "\($role) \($timestamp)\n```\n\($text)\n```\n\n"
-        end;
-      select(.type == "user" or .type == "assistant") |
-      message_text as $text |
-      if $text == "" then empty
-      else
-        if .type == "user" then emit("User"; .timestamp; $text) else emit($agent; .timestamp; $text) end
-      end
-    ' "$SESSION_FILE" > "$TMPOUT"
-    ;;
-  codex)
-    jq -r --arg agent "Codex" '
-      def message_text:
-        .payload.content |
-        if type == "array" then
-          map(
-            if .type == "input_text" then .text
-            elif .type == "output_text" then .text
-            elif .type == "text" then .text
-            else empty
-            end
-          ) | join("\n")
-        else "" end;
-      def emit($role; $timestamp; $text):
-        if ($text | length) == 0 then empty
-        else "\($role) \($timestamp)\n```\n\($text)\n```\n\n"
-        end;
-      select(.type == "response_item" and .payload.type == "message") |
-      message_text as $text |
-      if $text == "" then empty
-      elif ($text | test("^# AGENTS|^<environment|^<INSTRUCTIONS|^# Repository")) then empty
-      else
-        if .payload.role == "user" then emit("User"; .timestamp; $text)
-        elif .payload.role == "assistant" then emit($agent; .timestamp; $text)
-        else empty end
-      end
-    ' "$SESSION_FILE" > "$TMPOUT"
-    ;;
-  *)
-    echo "Unknown session format: $FORMAT" >&2
-    exit 1
-    ;;
-esac
+# Check for compaction and handle accordingly
+HAS_COMPACTION=false
+if check_compaction "$SESSION_FILE"; then
+  HAS_COMPACTION=true
+fi
 
+# Generate markdown header
+{
+  echo "# Conversation Log"
+  echo ""
+  echo "Generated: $(date '+%Y-%m-%d %H:%M')"
+  echo "Session: $ROOT_DIR"
+  if [[ "$HAS_COMPACTION" == true ]]; then
+    echo "Note: This conversation was compacted. Earlier context is summarized."
+  fi
+  echo ""
+  echo "---"
+  echo ""
+} > "$TMPOUT"
+
+# Extract messages - text only, no tool calls
+# For Claude Code sessions, we extract:
+# - type="user" messages with text content
+# - type="assistant" messages with text content (skip tool_use blocks)
+# - type="summary" for compaction context
+
+# Use a heredoc for cleaner jq script
+read -r -d '' JQ_SCRIPT << 'JQEOF' || true
+def extract_text:
+  .message.content |
+  if type == "string" then .
+  elif type == "array" then
+    map(
+      select(.type == "text" or .type == "input_text") |
+      .text // empty
+    ) | join("\n")
+  elif type == "object" and has("text") then .text
+  else "" end;
+
+# Determine fence length needed to wrap text containing backticks
+# Returns the appropriate fence string (``` or ```` or ````` etc)
+def get_fence($text):
+  # Find longest sequence of backticks in text and use one more
+  ([$text | scan("(`+)") | .[0]] | map(length) | max // 0) as $max_ticks |
+  if $max_ticks < 3 then "```"
+  else ([$max_ticks + 1, 3] | max) as $needed | ("`" * $needed)
+  end;
+
+def format_block($role; $ts; $text):
+  if ($text | length) == 0 then empty
+  else
+    get_fence($text) as $fence |
+    "\($role) \($ts)\n\($fence)\n\($text)\n\($fence)\n"
+  end;
+
+def process_summary:
+  select(.type == "summary") |
+  get_fence(.summary) as $fence |
+  "## Compacted Context\n\n\($fence)\n" + .summary + "\n\($fence)\n\n---\n";
+
+select(.type == "user" or .type == "assistant") |
+extract_text as $text |
+if $text == "" then empty
+else
+  if .type == "user" then
+    format_block("User"; .timestamp; $text)
+  else
+    format_block($agent; .timestamp; $text)
+  end
+end
+JQEOF
+
+# Handle topic filtering by modifying the script
+if [[ -n "$TOPIC_START" && -n "$TOPIC_END" ]]; then
+  JQ_SCRIPT="select(.timestamp >= \"$TOPIC_START\" and .timestamp <= \"$TOPIC_END\") | $JQ_SCRIPT"
+elif [[ -n "$TOPIC_START" ]]; then
+  JQ_SCRIPT="select(.timestamp >= \"$TOPIC_START\") | $JQ_SCRIPT"
+elif [[ -n "$TOPIC_END" ]]; then
+  JQ_SCRIPT="select(.timestamp <= \"$TOPIC_END\") | $JQ_SCRIPT"
+fi
+
+# Extract summaries first if compacted
+if [[ "$HAS_COMPACTION" == true ]]; then
+  jq -r '
+    def get_fence($text):
+      ([$text | scan("(`+)") | .[0]] | map(length) | max // 0) as $max_ticks |
+      if $max_ticks < 3 then "```"
+      else ([$max_ticks + 1, 3] | max) as $needed | ("`" * $needed)
+      end;
+    select(.type == "summary") |
+    get_fence(.summary) as $fence |
+    "## Compacted Context\n\n\($fence)\n" + .summary + "\n\($fence)\n\n---\n"
+  ' "$SESSION_FILE" >> "$TMPOUT" 2>/dev/null || true
+fi
+
+# Extract messages
+jq -r --arg agent "Claude Code" "$JQ_SCRIPT" "$SESSION_FILE" >> "$TMPOUT"
+
+# Count messages extracted
+MSG_COUNT=$(grep -c "^User \|^Claude Code " "$TMPOUT" 2>/dev/null || echo "0")
+
+# Move to final output location
+mkdir -p "$(dirname "$OUTPUT")"
 mv "$TMPOUT" "$OUTPUT"
+
 echo "Wrote transcript to: $OUTPUT"
+echo "Messages extracted: $MSG_COUNT"
+if [[ "$HAS_COMPACTION" == true ]]; then
+  echo "Note: Session was compacted - includes summary context"
+fi

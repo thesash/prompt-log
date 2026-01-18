@@ -19,14 +19,14 @@ Format is auto-detected.
 ## Usage
 
 ```bash
-# Basic extraction (outputs to .prompt-log/YYYY-MM-DD-HHMMSS.md)
+# Basic extraction (latest session for current platform)
+./skills/prompt-log/scripts/extract.sh
+
+# Explicit session file
 ./skills/prompt-log/scripts/extract.sh <session-file>
 
 # Custom output file
-./skills/prompt-log/scripts/extract.sh <session-file> --output my-transcript.md
-
-# Time-bounded extraction
-./skills/prompt-log/scripts/extract.sh <session-file> --after "2026-01-12T10:00:00" --before "2026-01-12T12:00:00"
+./skills/prompt-log/scripts/extract.sh --output my-transcript.md
 ```
 
 Output defaults to `.prompt-log/` directory to keep transcripts tidy in project folders.
